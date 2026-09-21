@@ -17,6 +17,7 @@ from .memory import MemoryManager
 from .rag import RAGEngine
 from .tools import create_tools
 from .prompts import build_system_prompt
+from .response_guard import agent_instructs_silence_for_media, should_suppress_ai_response
 
 
 class AutozapAgent:
@@ -78,6 +79,11 @@ class AutozapAgent:
         if memory.get("ai_paused"):
             return {"response": None, "status": "ai_paused"}
 
+        # Deterministic silence: custom instructions say not to reply to this media
+        if agent_instructs_silence_for_media(agent_config.get("system_prompt"), message):
+            print("[Agent] Skipping media reply (agent instructed silence)")
+            return {"response": None, "status": "no_reply"}
+
         # 2. RAG - Buscar no knowledge base
         knowledge_context = ""
         try:
@@ -126,7 +132,7 @@ class AutozapAgent:
 
         # 4. CRIAR FERRAMENTAS
         enabled_tools = agent_config.get("enabled_tools", None)
-        tools = create_tools(self.supabase, workspace_id, lead_id, enabled_tools=enabled_tools)
+        tools = create_tools(self.supabase, workspace_id, lead_id, instance_id=instance_id, enabled_tools=enabled_tools)
 
         # 5. MONTAR AGENTE COM LANGCHAIN
         prompt = ChatPromptTemplate.from_messages([
@@ -150,6 +156,7 @@ class AutozapAgent:
         chat_history = self.memory_manager.get_chat_messages(memory, limit=20)
 
         # 6. EXECUTAR AGENTE
+        result = None
         try:
             result = await executor.ainvoke({
                 "input": message,
@@ -166,6 +173,13 @@ class AutozapAgent:
 
         # 7. Converter markdown para WhatsApp
         final_response = self._convert_to_whatsapp(ai_response)
+
+        # 7b. Never deliver meta "I'm not replying" or looped garbage
+        if should_suppress_ai_response(final_response):
+            print(
+                f"[Agent] Suppressing no_reply/loop response: {str(final_response)[:120]!r}"
+            )
+            return {"response": None, "status": "no_reply"}
 
         # 8. SALVAR MEMÓRIA
         new_messages = [

@@ -9,6 +9,7 @@ import sys
 import time
 import logging
 import traceback
+import asyncio
 
 # Load .env for local dev
 try:
@@ -19,6 +20,7 @@ except ImportError:
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 # ─── Logging ───
@@ -90,13 +92,46 @@ async def health():
     return {"status": "ok", "service": "autozap-agent", "version": "1.0.0"}
 
 
+def _require_agent_secret(request: Request) -> None:
+    agent_secret = os.environ.get("AGENT_SECRET", "")
+    if not agent_secret:
+        return
+    auth = request.headers.get("authorization", "")
+    if auth.replace("Bearer ", "") != agent_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@app.post("/transcode/voice")
+async def transcode_voice_route(request: Request):
+    _require_agent_secret(request)
+    from agent.voice_transcode import VoiceTranscodeError, transcode_voice
+
+    content_type = (request.headers.get("content-type") or "").lower()
+    mime_type = request.headers.get("content-type")
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("file")
+        if hasattr(upload, "read"):
+            raw = await upload.read()
+            mime_type = getattr(upload, "content_type", None) or form.get("mime_type") or mime_type
+        else:
+            raw = b""
+    else:
+        raw = await request.body()
+
+    try:
+        output = await asyncio.to_thread(transcode_voice, raw, mime_type)
+    except VoiceTranscodeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    return Response(content=output, media_type="audio/ogg")
+
+
 @app.post("/process", response_model=ProcessResponse)
 async def process_message(req: ProcessRequest, request: Request):
-    agent_secret = os.environ.get("AGENT_SECRET", "")
-    if agent_secret:
-        auth = request.headers.get("authorization", "")
-        if auth.replace("Bearer ", "") != agent_secret:
-            raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_agent_secret(request)
 
     start = time.time()
     try:
