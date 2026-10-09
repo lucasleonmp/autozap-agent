@@ -17,9 +17,17 @@ import httpx
 
 from .stay_tools import create_stay_tools, workspace_has_stay, STAY_TOOL_NAMES
 from .rider_tools import create_rider_tools, workspace_has_rider, RIDER_TOOL_NAMES
+from .handoff import pause_for_human_handoff
 
 
-def create_tools(supabase: Client, workspace_id: str, lead_id: str, instance_id: str | None = None, enabled_tools: list[str] | None = None):
+def create_tools(
+    supabase: Client,
+    workspace_id: str,
+    lead_id: str,
+    instance_id: str | None = None,
+    enabled_tools: list[str] | None = None,
+    chat_id: str | None = None,
+):
     """Cria ferramentas contextualizadas para o agente.
 
     Args:
@@ -136,30 +144,24 @@ def create_tools(supabase: Client, workspace_id: str, lead_id: str, instance_id:
             reason: Motivo da transferência
         """
         try:
-            # Pause AI on chat_memory
-            result = (
-                supabase.table("chat_memory")
-                .select("id")
-                .eq("workspace_id", workspace_id)
-                .eq("lead_id", lead_id)
-                .limit(1)
-                .execute()
+            result = pause_for_human_handoff(
+                supabase,
+                workspace_id=workspace_id,
+                lead_id=lead_id,
+                chat_id=chat_id,
+                reason=reason,
+                source="tool",
             )
-
-            if result.data:
-                supabase.table("chat_memory").update({
-                    "ai_paused": True,
-                    "pause_reason": f"Transferência: {reason}",
-                    "paused_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", result.data[0]["id"]).execute()
-
-            # Also disable AI on the lead
-            supabase.table("leads").update({
-                "ai_enabled": False,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", lead_id).execute()
-
-            return f"✅ Conversa transferida para atendimento humano. Motivo: {reason}. A IA foi pausada."
+            if not result.get("ok"):
+                err = result.get("error") or "falha ao pausar"
+                return (
+                    f"Erro ao transferir: {err}. "
+                    "INFORME AO CLIENTE QUE HOUVE UM ERRO NA TRANSFERÊNCIA."
+                )
+            return (
+                f"✅ Conversa transferida para atendimento humano. "
+                f"Motivo: {reason}. A IA foi pausada."
+            )
         except Exception as e:
             return f"Erro ao transferir: {e}. INFORME AO CLIENTE QUE HOUVE UM ERRO NA TRANSFERÊNCIA."
 

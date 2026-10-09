@@ -147,6 +147,8 @@ class MemoryManager:
         }
 
         if memory_id:
+            # Do not send ai_paused / pause_reason — a concurrent handoff
+            # must not be overwritten by a history save.
             self.supabase.table("chat_memory").update(update_data).eq(
                 "id", memory_id
             ).execute()
@@ -154,7 +156,12 @@ class MemoryManager:
             update_data["lead_id"] = lead_id
             update_data["workspace_id"] = workspace_id
             update_data["chat_id"] = chat_id or lead_id
-            self.supabase.table("chat_memory").insert(update_data).execute()
+            # Upsert: transfer_to_human may have created the row on the
+            # first message (UNIQUE chat_id, workspace_id).
+            self.supabase.table("chat_memory").upsert(
+                update_data,
+                on_conflict="chat_id,workspace_id",
+            ).execute()
 
     async def _compress_history(
         self, messages: list[dict], previous_summary: str | None, llm
