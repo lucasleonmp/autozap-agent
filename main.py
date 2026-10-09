@@ -60,6 +60,8 @@ class ProcessResponse(BaseModel):
     status: str
     tools_used: list[str] = []
     latency_ms: float = 0
+    handoff: bool = False
+    handoff_source: str | None = None
 
 
 # ─── Agent (lazy) ───
@@ -152,6 +154,8 @@ async def process_message(req: ProcessRequest, request: Request):
             status=result.get("status", "success"),
             tools_used=result.get("tools_used", []),
             latency_ms=round(ms, 1),
+            handoff=bool(result.get("handoff")),
+            handoff_source=result.get("handoff_source"),
         )
     except Exception as e:
         logger.error(f"Error: {e}\n{traceback.format_exc()}")

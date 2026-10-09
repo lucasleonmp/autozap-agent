@@ -18,6 +18,7 @@ from .rag import RAGEngine
 from .tools import create_tools
 from .prompts import build_system_prompt
 from .response_guard import agent_instructs_silence_for_media, should_suppress_ai_response
+from .handoff import claims_human_transfer, pause_for_human_handoff
 
 
 class AutozapAgent:
@@ -132,7 +133,14 @@ class AutozapAgent:
 
         # 4. CRIAR FERRAMENTAS
         enabled_tools = agent_config.get("enabled_tools", None)
-        tools = create_tools(self.supabase, workspace_id, lead_id, instance_id=instance_id, enabled_tools=enabled_tools)
+        tools = create_tools(
+            self.supabase,
+            workspace_id,
+            lead_id,
+            instance_id=instance_id,
+            enabled_tools=enabled_tools,
+            chat_id=chat_id,
+        )
 
         # 5. MONTAR AGENTE COM LANGCHAIN
         prompt = ChatPromptTemplate.from_messages([
@@ -181,6 +189,26 @@ class AutozapAgent:
             )
             return {"response": None, "status": "no_reply"}
 
+        tools_used = (
+            [step[0].tool for step in result.get("intermediate_steps", [])]
+            if isinstance(result, dict)
+            else []
+        )
+        handoff_source = None
+        if "transfer_to_human" in tools_used:
+            handoff_source = "tool"
+        elif claims_human_transfer(final_response):
+            # Model promised a human without calling the tool (incl. fallback LLM).
+            pause_for_human_handoff(
+                self.supabase,
+                workspace_id=workspace_id,
+                lead_id=lead_id,
+                chat_id=chat_id,
+                reason="verbal_claim",
+                source="verbal",
+            )
+            handoff_source = "verbal"
+
         # 8. SALVAR MEMÓRIA
         new_messages = [
             {"role": "user", "content": message},
@@ -199,9 +227,9 @@ class AutozapAgent:
         return {
             "response": final_response,
             "status": "success",
-            "tools_used": [
-                step[0].tool for step in result.get("intermediate_steps", [])
-            ] if isinstance(result, dict) else [],
+            "tools_used": tools_used,
+            "handoff": bool(handoff_source),
+            "handoff_source": handoff_source,
         }
 
     async def _fallback_response(
