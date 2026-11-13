@@ -13,13 +13,16 @@ import json
 import httpx
 from supabase import Client
 
+from .usage import record_usage
+
 
 class RAGEngine:
     """Motor de RAG com busca híbrida e reranking inteligente."""
 
-    def __init__(self, supabase: Client, openai_api_key: str):
+    def __init__(self, supabase: Client, openai_api_key: str | None):
         self.supabase = supabase
-        self.openai_api_key = openai_api_key
+        key = (openai_api_key or "").strip()
+        self.openai_api_key = key if key and not key.startswith("AIza") else None
 
     async def search(
         self,
@@ -56,8 +59,8 @@ class RAGEngine:
             if llm and len(top_candidates) > 1:
                 try:
                     reranked = await self._llm_rerank(top_candidates, query, llm)
-                except Exception as e:
-                    print(f"[RAG] LLM rerank failed, using keyword fallback: {e}")
+                except Exception:
+                    print("[RAG] LLM rerank failed, using keyword fallback")
                     reranked = self._keyword_rerank(top_candidates, query)
             else:
                 reranked = self._keyword_rerank(top_candidates, query)
@@ -65,8 +68,8 @@ class RAGEngine:
             # 5. Formatar top-5 para o prompt
             return self._format_results(reranked[:5])
 
-        except Exception as e:
-            print(f"[RAG] Error during search: {e}")
+        except Exception:
+            print("[RAG] Error during search")
             return ""
 
     # ═══════════════════════════════════════════
@@ -82,8 +85,10 @@ class RAGEngine:
         threshold: float,
     ) -> list[dict]:
         """Busca semântica via embeddings."""
+        if not self.openai_api_key:
+            return []
         try:
-            embedding = await self._generate_embedding(query)
+            embedding = await self._generate_embedding(query, workspace_id)
             result = self.supabase.rpc(
                 "match_knowledge_base",
                 {
@@ -95,8 +100,8 @@ class RAGEngine:
                 },
             ).execute()
             return result.data or []
-        except Exception as e:
-            print(f"[RAG] Vector search error: {e}")
+        except Exception:
+            print("[RAG] Vector search error")
             return []
 
     async def _fulltext_search(
@@ -118,8 +123,8 @@ class RAGEngine:
                 },
             ).execute()
             return result.data or []
-        except Exception as e:
-            print(f"[RAG] Full-text search error: {e}")
+        except Exception:
+            print("[RAG] Full-text search error")
             return []
 
     # ═══════════════════════════════════════════
@@ -254,8 +259,8 @@ Retorne APENAS o JSON array de índices, ex: [3, 1, 5, 2, 4]. Nada mais."""
     # EMBEDDING GENERATION
     # ═══════════════════════════════════════════
 
-    async def _generate_embedding(self, text: str) -> list[float]:
-        """Gera embedding usando OpenAI text-embedding-3-small (1536 dims)."""
+    async def _generate_embedding(self, text: str, workspace_id: str) -> list[float]:
+        """Gera embedding usando OpenAI text-embedding-3-large (1536 dims)."""
         url = "https://api.openai.com/v1/embeddings"
 
         async with httpx.AsyncClient(timeout=30) as client:
@@ -266,10 +271,14 @@ Retorne APENAS o JSON array de índices, ex: [3, 1, 5, 2, 4]. Nada mais."""
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "text-embedding-3-small",
+                    "model": "text-embedding-3-large",
+                    "dimensions": 1536,
                     "input": text[:8000],
                 },
             )
             response.raise_for_status()
             data = response.json()
+            usage = data.get("usage", {})
+            if "prompt_tokens" in usage:
+                await record_usage(self.supabase, workspace_id, "openai", "text-embedding-3-large", usage["prompt_tokens"], 0)
             return data["data"][0]["embedding"]
