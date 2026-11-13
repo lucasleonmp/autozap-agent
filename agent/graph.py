@@ -31,14 +31,21 @@ class AutozapAgent:
         self.supabase = create_client(supabase_url, supabase_key)
 
         # AI keys: request > env var > error
-        resolved_key = ai_api_key or os.environ.get("AI_API_KEY", "")
-        resolved_model = ai_model or os.environ.get("AI_MODEL", "gemini-2.5-flash")
+        resolved_key = (ai_api_key or os.environ.get("AI_API_KEY", "")).strip()
+        resolved_model = (ai_model or os.environ.get("AI_MODEL", "gemini-2.5-flash")).strip()
+        for prefix in ("models/", "google/"):
+            if resolved_model.startswith(prefix):
+                resolved_model = resolved_model[len(prefix):]
+                break
 
         if not re.fullmatch(r"gemini-[A-Za-z0-9][A-Za-z0-9.-]*", resolved_model):
             raise ValueError("AI_MODEL must be a Gemini model for the Google provider")
 
         if not resolved_key:
             raise ValueError("AI_API_KEY must be provided via request or environment variable")
+
+        if resolved_key.startswith("sk-"):
+            raise ValueError("AI_API_KEY must be a Google credential")
 
         self.llm = ChatGoogleGenerativeAI(
             model=resolved_model,
@@ -101,8 +108,8 @@ class AutozapAgent:
                 agent_id=agent_config.get("id"),
                 llm=llm_lite,
             )
-        except Exception as e:
-            print(f"[Agent] RAG search failed (non-blocking): {e}")
+        except Exception:
+            print("[Agent] RAG search failed (non-blocking)")
 
         # Use edge context as fallback if Python RAG returned nothing
         if not knowledge_context and edge_knowledge_context:
@@ -172,8 +179,8 @@ class AutozapAgent:
             }, config={"callbacks": [usage_callback]})
 
             ai_response = result["output"]
-        except Exception as e:
-            print(f"[Agent] Error during execution: {e}")
+        except Exception:
+            print("[Agent] Error during execution")
             # Fallback: chamada direta sem ferramentas
             ai_response = await self._fallback_response(
                 system_prompt, chat_history, message, usage_callback

@@ -143,3 +143,91 @@ async def test_rpc_failure_yields_empty_context():
     db = Supabase()
     db.rpc = MagicMock(side_effect=RuntimeError("RPC unavailable"))
     assert await RAGEngine(db, None).search("workspace", "q", "agent") == ""
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('key', ['AIzaSy-audit-fake', '  AIzaSy-audit-fake  ', '   '])
+async def test_google_or_blank_key_never_reaches_openai(key):
+    db = Supabase({'fulltext_knowledge_base': [{'id': '1', 'title': 't', 'content': 'found'}]})
+    calls = []
+    with mock_http(lambda request: calls.append(request) or httpx.Response(401)):
+        assert 'found' in await RAGEngine(db, key).search('w', 'q')
+    assert not calls
+
+
+@pytest.mark.asyncio
+async def test_unknown_and_versioned_models_are_not_free():
+    db = Supabase()
+    await record_usage(db, 'w', 'gemini', 'gemini-unknown', 1, 1)
+    await record_usage(db, 'w', 'gemini', 'models/gemini-2.5-flash-001', 1, 1)
+    await record_usage(db, 'w', 'gemini', 'google/gemini-2.5-flash', 1, 1)
+    assert all(row['estimated_cost_usd'] is None for row in db.rows[:2])
+    assert db.rows[2]['estimated_cost_usd'] > 0
+
+
+def test_google_rejects_openai_key_and_normalizes_models(monkeypatch):
+    from agent.graph import AutozapAgent
+    monkeypatch.setenv('SUPABASE_URL', 'https://example.test')
+    monkeypatch.setenv('SUPABASE_SERVICE_ROLE_KEY', 'service')
+    with patch('agent.graph.create_client'), patch('agent.graph.ChatGoogleGenerativeAI') as google:
+        with pytest.raises(ValueError):
+            AutozapAgent(' sk-fake ', 'gemini-2.5-flash')
+        assert not google.called
+        for model in ('models/gemini-2.5-flash', 'google/gemini-2.5-flash'):
+            AutozapAgent(' google-key ', model)
+            assert google.call_args_list[-2].kwargs['model'] == 'gemini-2.5-flash'
+            assert google.call_args_list[-2].kwargs['google_api_key'] == 'google-key'
+
+@pytest.mark.asyncio
+async def test_stalled_logger_has_deadline_and_bounded_workers(monkeypatch, caplog):
+    import asyncio
+    import threading
+    import time
+    import agent.usage as usage
+
+    release = threading.Event()
+    started = []
+    lock = threading.Lock()
+    class StalledDB:
+        def table(self, _name):
+            def insert(row):
+                def execute():
+                    with lock:
+                        started.append(row['workspace_id'])
+                    release.wait(5)
+                    raise RuntimeError('secret-payload')
+                return SimpleNamespace(execute=execute)
+            return SimpleNamespace(insert=insert)
+    monkeypatch.setattr(usage, '_USAGE_DEADLINE', 0.05, raising=False)
+    try:
+        begin = time.monotonic()
+        heartbeat = asyncio.Event()
+        async def tick():
+            await asyncio.sleep(0.01)
+            heartbeat.set()
+        await asyncio.gather(tick(), *(record_usage(StalledDB(), f'w{i}', 'gemini', 'unknown', 1, 1) for i in range(12)))
+        assert heartbeat.is_set()
+        assert time.monotonic() - begin < 0.5
+        assert len(started) == 4
+        assert len(set(started)) == 4
+        assert 'secret-payload' not in caplog.text
+    finally:
+        release.set()
+        for _ in range(100):
+            if not any(t.name == 'ai-usage' and t.is_alive() for t in threading.enumerate()):
+                break
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_principal_and_fallback_callbacks_record_once_per_call():
+    from agent.graph import AutozapAgent
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    db = Supabase()
+    def response():
+        return AIMessage(content='ok', usage_metadata={'input_tokens': 2, 'output_tokens': 1, 'total_tokens': 3}, response_metadata={'model_name': 'gemini-2.5-flash'})
+    agent = AutozapAgent.__new__(AutozapAgent)
+    agent.llm = FakeMessagesListChatModel(responses=[response(), response()])
+    callback_a, callback_b = UsageCallback(db, 'a'), UsageCallback(db, 'b')
+    await agent.llm.ainvoke('principal', config={'callbacks': [callback_a]})
+    assert await agent._fallback_response('system', [], 'fallback', callback_b) == 'ok'
+    assert [r['workspace_id'] for r in db.rows] == ['a', 'b']

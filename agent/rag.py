@@ -21,7 +21,8 @@ class RAGEngine:
 
     def __init__(self, supabase: Client, openai_api_key: str | None):
         self.supabase = supabase
-        self.openai_api_key = openai_api_key
+        key = (openai_api_key or "").strip()
+        self.openai_api_key = key if key and not key.startswith("AIza") else None
 
     async def search(
         self,
@@ -58,8 +59,8 @@ class RAGEngine:
             if llm and len(top_candidates) > 1:
                 try:
                     reranked = await self._llm_rerank(top_candidates, query, llm)
-                except Exception as e:
-                    print(f"[RAG] LLM rerank failed, using keyword fallback: {e}")
+                except Exception:
+                    print("[RAG] LLM rerank failed, using keyword fallback")
                     reranked = self._keyword_rerank(top_candidates, query)
             else:
                 reranked = self._keyword_rerank(top_candidates, query)
@@ -67,8 +68,8 @@ class RAGEngine:
             # 5. Formatar top-5 para o prompt
             return self._format_results(reranked[:5])
 
-        except Exception as e:
-            print(f"[RAG] Error during search: {e}")
+        except Exception:
+            print("[RAG] Error during search")
             return ""
 
     # ═══════════════════════════════════════════
@@ -99,8 +100,8 @@ class RAGEngine:
                 },
             ).execute()
             return result.data or []
-        except Exception as e:
-            print(f"[RAG] Vector search error: {e}")
+        except Exception:
+            print("[RAG] Vector search error")
             return []
 
     async def _fulltext_search(
@@ -122,8 +123,8 @@ class RAGEngine:
                 },
             ).execute()
             return result.data or []
-        except Exception as e:
-            print(f"[RAG] Full-text search error: {e}")
+        except Exception:
+            print("[RAG] Full-text search error")
             return []
 
     # ═══════════════════════════════════════════
