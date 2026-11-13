@@ -7,6 +7,7 @@ em um loop de raciocínio (ReAct pattern).
 """
 
 import os
+import re
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain.agents import AgentExecutor, create_tool_calling_agent
@@ -15,6 +16,7 @@ from supabase import create_client
 
 from .memory import MemoryManager
 from .rag import RAGEngine
+from .usage import UsageCallback
 from .tools import create_tools
 from .prompts import build_system_prompt
 from .response_guard import agent_instructs_silence_for_media, should_suppress_ai_response
@@ -31,6 +33,9 @@ class AutozapAgent:
         # AI keys: request > env var > error
         resolved_key = ai_api_key or os.environ.get("AI_API_KEY", "")
         resolved_model = ai_model or os.environ.get("AI_MODEL", "gemini-2.5-flash")
+
+        if not re.fullmatch(r"gemini-[A-Za-z0-9][A-Za-z0-9.-]*", resolved_model):
+            raise ValueError("AI_MODEL must be a Gemini model for the Google provider")
 
         if not resolved_key:
             raise ValueError("AI_API_KEY must be provided via request or environment variable")
@@ -54,7 +59,7 @@ class AutozapAgent:
         self.memory_manager = MemoryManager(self.supabase)
 
         # OpenAI key for embeddings (RAG) — separate from Gemini LLM key
-        openai_key = os.environ.get("OPENAI_API_KEY", resolved_key)
+        openai_key = os.environ.get("OPENAI_API_KEY")
         self.rag_engine = RAGEngine(self.supabase, openai_key)
 
     async def process(
@@ -68,6 +73,9 @@ class AutozapAgent:
         edge_knowledge_context: str | None = None,
     ) -> dict:
         """Processa uma mensagem e retorna a resposta do agente."""
+
+        usage_callback = UsageCallback(self.supabase, workspace_id)
+        llm_lite = self.llm_lite.with_config({"callbacks": [usage_callback]})
 
         # 1. CARREGAR MEMÓRIA
         memory = await self.memory_manager.load(lead_id, workspace_id)
@@ -91,7 +99,7 @@ class AutozapAgent:
                 workspace_id=workspace_id,
                 query=message,
                 agent_id=agent_config.get("id"),
-                llm=self.llm_lite,
+                llm=llm_lite,
             )
         except Exception as e:
             print(f"[Agent] RAG search failed (non-blocking): {e}")
@@ -161,14 +169,14 @@ class AutozapAgent:
             result = await executor.ainvoke({
                 "input": message,
                 "chat_history": chat_history,
-            })
+            }, config={"callbacks": [usage_callback]})
 
             ai_response = result["output"]
         except Exception as e:
             print(f"[Agent] Error during execution: {e}")
             # Fallback: chamada direta sem ferramentas
             ai_response = await self._fallback_response(
-                system_prompt, chat_history, message
+                system_prompt, chat_history, message, usage_callback
             )
 
         # 7. Converter markdown para WhatsApp
@@ -193,7 +201,7 @@ class AutozapAgent:
             chat_id=chat_id or lead_id,
             new_messages=new_messages,
             current_memory=memory,
-            llm=self.llm_lite,
+            llm=llm_lite,
         )
 
         return {
@@ -205,14 +213,14 @@ class AutozapAgent:
         }
 
     async def _fallback_response(
-        self, system_prompt: str, chat_history: list, message: str
+        self, system_prompt: str, chat_history: list, message: str, usage_callback=None
     ) -> str:
         """Resposta direta sem ferramentas (fallback de segurança)."""
         messages = [SystemMessage(content=system_prompt)]
         messages.extend(chat_history[-10:])
         messages.append(HumanMessage(content=message))
 
-        response = await self.llm.ainvoke(messages)
+        response = await self.llm.ainvoke(messages, config={"callbacks": [usage_callback]} if usage_callback else None)
         return response.content
 
     @staticmethod

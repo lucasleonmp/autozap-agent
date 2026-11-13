@@ -13,11 +13,13 @@ import json
 import httpx
 from supabase import Client
 
+from .usage import record_usage
+
 
 class RAGEngine:
     """Motor de RAG com busca híbrida e reranking inteligente."""
 
-    def __init__(self, supabase: Client, openai_api_key: str):
+    def __init__(self, supabase: Client, openai_api_key: str | None):
         self.supabase = supabase
         self.openai_api_key = openai_api_key
 
@@ -82,8 +84,10 @@ class RAGEngine:
         threshold: float,
     ) -> list[dict]:
         """Busca semântica via embeddings."""
+        if not self.openai_api_key:
+            return []
         try:
-            embedding = await self._generate_embedding(query)
+            embedding = await self._generate_embedding(query, workspace_id)
             result = self.supabase.rpc(
                 "match_knowledge_base",
                 {
@@ -254,8 +258,8 @@ Retorne APENAS o JSON array de índices, ex: [3, 1, 5, 2, 4]. Nada mais."""
     # EMBEDDING GENERATION
     # ═══════════════════════════════════════════
 
-    async def _generate_embedding(self, text: str) -> list[float]:
-        """Gera embedding usando OpenAI text-embedding-3-small (1536 dims)."""
+    async def _generate_embedding(self, text: str, workspace_id: str) -> list[float]:
+        """Gera embedding usando OpenAI text-embedding-3-large (1536 dims)."""
         url = "https://api.openai.com/v1/embeddings"
 
         async with httpx.AsyncClient(timeout=30) as client:
@@ -266,10 +270,14 @@ Retorne APENAS o JSON array de índices, ex: [3, 1, 5, 2, 4]. Nada mais."""
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "text-embedding-3-small",
+                    "model": "text-embedding-3-large",
+                    "dimensions": 1536,
                     "input": text[:8000],
                 },
             )
             response.raise_for_status()
             data = response.json()
+            usage = data.get("usage", {})
+            if "prompt_tokens" in usage:
+                await record_usage(self.supabase, workspace_id, "openai", "text-embedding-3-large", usage["prompt_tokens"], 0)
             return data["data"][0]["embedding"]
